@@ -1,0 +1,109 @@
+name: ci
+
+on:
+  push:
+    branches: [master, develop]
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          # The module has no dependencies, so there is no go.sum to cache.
+          cache: false
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          if [ -n "$(git status --porcelain -- go.mod go.sum)" ]; then
+            echo "go.mod/go.sum are not tidy; run go mod tidy and commit the result."
+            git diff -- go.mod go.sum
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0
+
+      - name: Tool dispatch
+        run: |
+          go build -o /tmp/hall ./cmd/hall
+          /tmp/hall --help >/dev/null
+          for t in dockerage gitcheck gitclone gitarc rmempty; do /tmp/hall "$t" --help >/dev/null; done
+          /tmp/hall aliases >/dev/null
+          /tmp/gitcheck --help >/dev/null
+
+      - name: Shell assets
+        run: |
+          bash -n install.sh
+          for f in shell/lib/*.sh shell/source/*.sh shell/tests/*.sh legacy/*.sh legacy/lib/*.sh; do
+            bash -n "$f"
+          done
+          bash shell/tests/run.sh
+
+  release:
+    name: release
+    needs: ci
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Build archives
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          verpkg="github.com/QuietSugar/hall-kit/internal/version"
+          commit="${GITHUB_SHA:0:7}"
+          date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          ldflags="-s -w -X ${verpkg}.Version=${tag} -X ${verpkg}.Commit=${commit} -X ${verpkg}.Date=${date}"
+          mkdir -p dist
+          for goos in linux darwin windows; do
+            for goarch in amd64 arm64; do
+              stage="dist/stage"
+              rm -rf "$stage"; mkdir -p "$stage"
+              out="hall"
+              if [ "$goos" = windows ]; then out="hall.exe"; fi
+              GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 go build -trimpath -ldflags "$ldflags" -o "$stage/$out" ./cmd/hall
+              archive="hall-kit_${tag}_${goos}_${goarch}.tar.gz"
+              tar -czf "dist/$archive" -C "$stage" .
+            done
+          done
+          rm -rf dist/stage
+          (cd dist && sha256sum hall-kit_*.tar.gz > checksums.txt)
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

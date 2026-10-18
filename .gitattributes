@@ -1,0 +1,5 @@
+# Keep shell scripts LF on every platform so bash/git-bash stay happy.
+* text=auto
+*.sh text eol=lf
+*.bat text eol=crlf
+*.zip binary
